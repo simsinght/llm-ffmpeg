@@ -1,0 +1,554 @@
+#!/bin/bash
+
+# ollmpeg - Local FFmpeg Command Generator using Ollama
+# Usage: ./ollmpeg "what you want to do with ffmpeg"
+
+set -e
+
+# Load configuration from persistent file first
+load_persistent_config() {
+    local config_file="$HOME/.ollmpeg.conf"
+    if [[ -f "$config_file" ]]; then
+        source "$config_file"
+    fi
+}
+
+# Load persistent config
+load_persistent_config
+
+# Then load from config.sh if available (for additional settings)
+if [[ -f "$(dirname "$0")/config.sh" ]]; then
+    source "$(dirname "$0")/config.sh"
+fi
+
+# Set defaults if not already configured
+OLLAMA_MODEL="${OLLMPEG_MODEL:-deepseek-r1:1.5b}"  # Default model, can be changed
+LLM_MODEL_NAME="$OLLAMA_MODEL"  # Use model name directly with modern llm
+TEMP_DIR="/tmp/ollmpeg"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Create temp directory
+mkdir -p "$TEMP_DIR"
+
+# Function to print colored output
+print_status() {
+    echo -e "${BLUE}[ollmpeg]${NC} $1"
+}
+
+print_success() {
+    echo -e "${GREEN}[ollmpeg]${NC} $1"
+}
+
+print_warning() {
+    echo -e "${YELLOW}[ollmpeg]${NC} $1"
+}
+
+print_error() {
+    echo -e "${RED}[ollmpeg]${NC} $1"
+}
+
+# Function to check if required tools are installed
+check_dependencies() {
+    local missing_deps=()
+    
+    if ! command -v ollama &> /dev/null; then
+        missing_deps+=("ollama")
+    fi
+    
+    if ! command -v llm &> /dev/null; then
+        missing_deps+=("llm")
+    fi
+    
+    if ! command -v ffmpeg &> /dev/null; then
+        missing_deps+=("ffmpeg")
+    fi
+    
+    if [ ${#missing_deps[@]} -ne 0 ]; then
+        print_error "Missing required dependencies: ${missing_deps[*]}"
+        echo ""
+        echo "Please install the missing dependencies:"
+        for dep in "${missing_deps[@]}"; do
+            case $dep in
+                "ollama")
+                    echo "  - ollama: https://ollama.ai/"
+                    ;;
+                "llm")
+                    echo "  - llm: pip install llm"
+                    echo "    then: llm install llm-ollama"
+                    ;;
+                "ffmpeg")
+                    echo "  - ffmpeg: brew install ffmpeg (on macOS)"
+                    ;;
+            esac
+        done
+        exit 1
+    fi
+}
+
+# Function to setup llm ollama integration
+setup_llm_ollama() {
+    print_status "Setting up llm-ollama integration..."
+    
+    # Check if ollama plugin is installed using llm plugins
+    if ! llm plugins 2>/dev/null | grep -q '"name": "llm-ollama"'; then
+        print_status "Installing llm-ollama plugin..."
+        llm install llm-ollama
+    else
+        print_status "llm-ollama plugin already available"
+    fi
+    
+    # Note: No need to register models with modern llm-ollama
+    # The plugin automatically detects available ollama models
+    print_status "llm-ollama integration ready"
+}
+
+# Function to ensure ollama model is available
+ensure_model() {
+    print_status "Checking if model $OLLAMA_MODEL is available..."
+    
+    if ! ollama list | grep -q "${OLLAMA_MODEL%:*}"; then
+        print_status "Pulling model $OLLAMA_MODEL..."
+        ollama pull "$OLLAMA_MODEL"
+    fi
+    
+    print_success "Model $OLLAMA_MODEL is ready"
+}
+
+# Function to get file info using ffmpeg
+get_file_info() {
+    local filename="$1"
+    local info_file="$TEMP_DIR/file_info.txt"
+    
+    if [[ -f "$filename" ]]; then
+        print_status "Analyzing file: $filename"
+        # Get file info using ffmpeg (redirect stderr to capture the info)
+        ffmpeg -i "$filename" 2> "$info_file" || true
+        
+        # Extract useful info from the output
+        local file_info=""
+        if [[ -f "$info_file" ]]; then
+            file_info=$(grep -E "(Input|Duration|Stream)" "$info_file" | head -20)
+        fi
+        
+        if [[ -n "$file_info" ]]; then
+            echo "$file_info"
+        else
+            echo "Could not analyze file: $filename"
+        fi
+    else
+        echo "File not found: $filename"
+    fi
+}
+
+# Function to extract subtitle information from file analysis
+get_subtitle_info() {
+    local filename="$1"
+    local info_file="$TEMP_DIR/file_info.txt"
+    
+    if [[ -f "$info_file" ]]; then
+        # Extract subtitle streams with their indices and languages using sed
+        grep "Subtitle:" "$info_file" | sed -n 's/.*Stream #[0-9]*:\([0-9]*\)(\([^)]*\)):.*Subtitle.*/subtitle_stream:\1:\2/p' > "$TEMP_DIR/subtitle_info.txt"
+    fi
+}
+
+# Function to detect operation patterns and use templates
+detect_and_apply_template() {
+    local filename="$1"
+    local user_request="$2"
+    local request_lower=$(echo "$user_request" | tr '[:upper:]' '[:lower:]')
+    
+    # Extract time range if present
+    local start_time=""
+    local end_time=""
+    if [[ $request_lower =~ from[[:space:]]+([0-9]+:[0-9]+([:.][0-9]+)?)[[:space:]]+to[[:space:]]+([0-9]+:[0-9]+([:.][0-9]+)?) ]]; then
+        start_time="${BASH_REMATCH[1]}"
+        end_time="${BASH_REMATCH[3]}"
+        # Ensure proper time format (HH:MM:SS)
+        if [[ $start_time =~ ^[0-9]+:[0-9]+$ ]]; then
+            start_time="${start_time}:00"
+        fi
+        if [[ $end_time =~ ^[0-9]+:[0-9]+$ ]]; then
+            end_time="${end_time}:00"
+        fi
+    fi
+    
+    # Get subtitle information
+    get_subtitle_info "$filename"
+    
+    # Default subtitle stream (first English subtitle, or first subtitle if no English)
+    local default_subtitle_index=""
+    local english_subtitle_index=""
+    local first_subtitle_index=""
+    
+    if [[ -f "$TEMP_DIR/subtitle_info.txt" ]]; then
+        while IFS=: read -r prefix index language; do
+            if [[ $prefix == "subtitle_stream" ]]; then
+                [[ -z $first_subtitle_index ]] && first_subtitle_index="$index"
+                [[ $language == "eng" && -z $english_subtitle_index ]] && english_subtitle_index="$index"
+            fi
+        done < "$TEMP_DIR/subtitle_info.txt"
+        
+        default_subtitle_index="${english_subtitle_index:-$first_subtitle_index}"
+    fi
+    
+    # Pattern 1: Clip with hardcoded subtitles to MP4
+    if [[ $request_lower =~ (clip|extract|cut).*subtitle.*mp4 ]] || 
+       [[ $request_lower =~ (hardcode|burn|embed).*subtitle ]] ||
+       [[ $request_lower =~ subtitle.*mp4 && $request_lower =~ (clip|from.*to) ]]; then
+        
+        if [[ -n $start_time && -n $end_time && -n $default_subtitle_index ]]; then
+            local output_name="${filename%.*}_clip.mp4"
+            local template_command="ffmpeg -i \"$filename\" -ss $start_time -to $end_time -vf \"subtitles='$filename':si=$default_subtitle_index\" -c:v libx264 -preset medium -crf 23 -c:a aac -ac 2 -b:a 128k \"$output_name\""
+            
+            print_success "Using subtitle hardcoding template"
+            print_status "Detected subtitle stream: #$default_subtitle_index"
+            echo "$template_command"
+            return 0
+        fi
+    fi
+    
+    # Pattern 2: Simple clip without subtitles
+    if [[ $request_lower =~ (clip|extract|cut).*from.*to ]] && [[ ! $request_lower =~ subtitle ]]; then
+        if [[ -n $start_time && -n $end_time ]]; then
+            local output_ext="${filename##*.}"
+            local output_name="${filename%.*}_clip.$output_ext"
+            local template_command="ffmpeg -i \"$filename\" -ss $start_time -to $end_time -c copy \"$output_name\""
+            
+            print_success "Using simple clip template"
+            echo "$template_command"
+            return 0
+        fi
+    fi
+    
+    # Pattern 3: Convert to MP4 with subtitles
+    if [[ $request_lower =~ convert.*mp4.*subtitle ]] || [[ $request_lower =~ mp4.*subtitle ]]; then
+        if [[ -n $default_subtitle_index ]]; then
+            local output_name="${filename%.*}.mp4"
+            local template_command="ffmpeg -i \"$filename\" -vf \"subtitles='$filename':si=$default_subtitle_index\" -c:v libx264 -preset medium -crf 23 -c:a aac \"$output_name\""
+            
+            print_success "Using MP4 conversion with subtitles template"
+            print_status "Detected subtitle stream: #$default_subtitle_index"
+            echo "$template_command"
+            return 0
+        fi
+    fi
+    
+    # No template matched
+    return 1
+}
+
+# Function to generate ffmpeg command
+generate_ffmpeg_command() {
+    local filename="$1"
+    local user_request="$2"
+    local prompt_file="$TEMP_DIR/prompt.txt"
+    local response_file="$TEMP_DIR/response.txt"
+    local command_file="$TEMP_DIR/command.txt"
+    
+    # Get file info if filename is provided
+    local file_info=""
+    if [[ -n "$filename" && "$filename" != "unknown" ]]; then
+        file_info=$(get_file_info "$filename")
+        
+        # Try template matching first for file-based operations
+        print_status "Checking for template matches..."
+        local template_command=""
+        if template_command=$(detect_and_apply_template "$filename" "$user_request"); then
+            # Template matched, use it directly
+            local ffmpeg_command="$template_command"
+            
+            # Skip to interactive loop
+            while true; do
+                echo ""
+                print_success "Generated command:"
+                echo ""
+                echo "  $ffmpeg_command"
+                echo ""
+                
+                # Ask user what they want to do
+                echo "Options:"
+                echo "  [y] Run this command"
+                echo "  [n] Don't run, copy to clipboard and exit"
+                echo "  [r] Refine the command (provide feedback)"
+                echo "  [a] Use AI instead of template"
+                echo ""
+                read -p "$(echo -e ${YELLOW}[ollmpeg]${NC}) What would you like to do? (y/n/r/a): " -r
+                echo
+                
+                case $REPLY in
+                    [Yy])
+                        print_status "Executing ffmpeg command..."
+                        echo ""
+                        eval "$ffmpeg_command"
+                        print_success "Command completed!"
+                        return 0
+                        ;;
+                    [Nn])
+                        print_status "Command saved to clipboard (if available)"
+                        clean_command=$(echo "$ffmpeg_command" | tr -d '`' | sed 's/[[:space:]]*$//')
+                        if command -v pbcopy &> /dev/null; then
+                            echo "$clean_command" | pbcopy
+                        elif command -v xclip &> /dev/null; then
+                            echo "$clean_command" | xclip -selection clipboard
+                        fi
+                        return 0
+                        ;;
+                    [Rr])
+                        echo ""
+                        read -p "$(echo -e ${YELLOW}[ollmpeg]${NC}) What would you like to change about this command? " refinement
+                        if [[ -n "$refinement" ]]; then
+                            # For template refinement, we'll use AI with the template as starting point
+                            print_status "Using AI to refine template-based command..."
+                            break
+                        fi
+                        ;;
+                    [Aa])
+                        print_status "Switching to AI generation..."
+                        break
+                        ;;
+                    *)
+                        echo "Please enter y, n, r, or a"
+                        ;;
+                esac
+            done
+        else
+            print_status "No template match found, using AI generation..."
+        fi
+    fi
+    
+    # Create the enhanced system prompt with file info
+    local system_prompt="You are an expert in FFmpeg command-line usage. Generate a complete, working FFmpeg command based on the user's request.
+
+Rules:
+1. Provide ONLY the ffmpeg command, no explanations or additional text. Format the command on a single line surrounded by a fence like \`\`\`bash COMMAND \`\`\`
+2. Include all necessary parameters for the requested operation
+3. Ensure the command is syntactically correct and will work
+4. Use the actual filename provided: $filename
+5. If the request is unclear, make reasonable assumptions for common use cases, but keep the command simple"
+
+    # Add file info if available
+    if [[ -n "$file_info" ]]; then
+        system_prompt="$system_prompt
+
+File Information:
+$file_info"
+    fi
+    
+    print_status "Generating ffmpeg command for: $user_request"
+    if [[ -n "$filename" && "$filename" != "unknown" ]]; then
+        print_status "Input file: $filename"
+    fi
+    
+    # Log the initial LLM command for debugging
+    echo "=== INITIAL LLM COMMAND ===" > "$TEMP_DIR/llm_commands.log"
+    echo "llm -m '$LLM_MODEL_NAME' --xl -s '$system_prompt' '$user_request'" >> "$TEMP_DIR/llm_commands.log"
+    echo "" >> "$TEMP_DIR/llm_commands.log"
+    
+    # Use llm to generate the command with --xl flag for clean extraction
+    if llm -m "$LLM_MODEL_NAME" --xl -s "$system_prompt" "$user_request" > "$response_file" 2>"$TEMP_DIR/error.log"; then
+        # With --xl flag, the response should be just the command - much simpler extraction
+        local ffmpeg_command=$(cat "$response_file" | head -1 | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')
+        
+        if [ -n "$ffmpeg_command" ]; then
+            # Interactive refinement loop
+            while true; do
+                print_success "Generated command:"
+                echo ""
+                echo "  $ffmpeg_command"
+                echo ""
+                
+                # Ask user what they want to do
+                echo "Options:"
+                echo "  [y] Run this command"
+                echo "  [n] Don't run, copy to clipboard and exit"
+                echo "  [r] Refine the command (provide feedback)"
+                echo ""
+                read -p "$(echo -e ${YELLOW}[ollmpeg]${NC}) What would you like to do? (y/n/r): " -r
+                echo
+                
+                case $REPLY in
+                    [Yy])
+                        print_status "Executing ffmpeg command..."
+                        echo ""
+                        # Clean the command of any extra characters that might cause syntax errors
+                        clean_command=$(echo "$ffmpeg_command" | tr -d '`' | sed 's/[[:space:]]*$//')
+                        eval "$clean_command"
+                        print_success "Command completed!"
+                        break
+                        ;;
+                    [Nn])
+                        print_status "Command saved to clipboard (if available)"
+                        clean_command=$(echo "$ffmpeg_command" | tr -d '`' | sed 's/[[:space:]]*$//')
+                        if command -v pbcopy &> /dev/null; then
+                            echo "$clean_command" | pbcopy
+                        elif command -v xclip &> /dev/null; then
+                            echo "$clean_command" | xclip -selection clipboard
+                        fi
+                        break
+                        ;;
+                    [Rr])
+                        echo ""
+                        read -p "$(echo -e ${YELLOW}[ollmpeg]${NC}) What would you like to change about this command? " refinement
+                        if [[ -n "$refinement" ]]; then
+                            print_status "Refining command based on your feedback..."
+                            
+                            # Create a refinement prompt that preserves context
+                            local refinement_prompt="You are an expert in FFmpeg command-line usage. The user asked for an FFmpeg command and you provided:
+
+$ffmpeg_command
+
+But the user wants to refine it. Their feedback is: $refinement
+
+Please provide an improved FFmpeg command that addresses their feedback.
+
+Rules:
+1. Provide ONLY the ffmpeg command, no explanations or additional text, on a single line surrounded by fence \`\`\`bash
+2. Use the actual filename provided: $filename
+3. Include all necessary parameters for the requested operation
+4. Ensure the command is syntactically correct and will work
+5. Address the user's specific feedback"
+
+    # Add file info to refinement prompt if available
+    if [[ -n "$file_info" ]]; then
+        refinement_prompt="$refinement_prompt
+
+File Information:
+$file_info"
+    fi
+                            
+                            # Log the refinement LLM command for debugging
+                            echo "=== REFINEMENT LLM COMMAND ===" >> "$TEMP_DIR/llm_commands.log"
+                            echo "llm -m '$LLM_MODEL_NAME' --xl -s '$refinement_prompt' ''" >> "$TEMP_DIR/llm_commands.log"
+                            echo "" >> "$TEMP_DIR/llm_commands.log"
+                            
+                            # Generate refined command using --xl flag for clean extraction
+                            if llm -m "$LLM_MODEL_NAME" --xl -s "$refinement_prompt" "" > "$response_file" 2>"$TEMP_DIR/error.log"; then
+                                # With --xl flag, the response should be just the command
+                                local new_command=$(cat "$response_file" | head -1 | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')
+                                
+                                if [[ -n "$new_command" ]]; then
+                                    ffmpeg_command="$new_command"
+                                    print_success "Command refined!"
+                                else
+                                    print_error "Could not generate refined command. Try again."
+                                    print_status "Debug - Raw refinement response:"
+                                    cat "$response_file"
+                                fi
+                            else
+                                print_error "Failed to refine command. Try again."
+                            fi
+                        fi
+                        ;;
+                    *)
+                        echo "Please enter y, n, or r"
+                        ;;
+                esac
+            done
+        else
+            print_error "Could not extract ffmpeg command from response"
+            print_status "Raw response:"
+            cat "$response_file"
+        fi
+    else
+        print_error "Failed to generate command using llm"
+        print_status "Error details:"
+        cat "$TEMP_DIR/error.log"
+        exit 1
+    fi
+}
+
+# Function to show usage
+show_usage() {
+    echo "ollmpeg - Local FFmpeg Command Generator with File Analysis"
+    echo ""
+    echo "Usage:"
+    echo "  ./ollmpeg FILENAME \"description of what you want to do\""
+    echo "  ./ollmpeg \"description of what you want to do\"  (without file analysis)"
+    echo ""
+    echo "Examples:"
+    echo "  ./ollmpeg video.mp4 \"convert to audio\""
+    echo "  ./ollmpeg movie.mkv \"clip from 1:30 to 2:45 with subtitles\""
+    echo "  ./ollmpeg audio.wav \"resize to 720p\""
+    echo "  ./ollmpeg \"combine audio.mp3 with video.mp4\""
+    echo ""
+    echo "Options:"
+    echo "  -h, --help     Show this help message"
+    echo "  -s, --setup    Setup dependencies and models"
+    echo "  -m, --model    Specify ollama model (current: $OLLAMA_MODEL)"
+    echo ""
+    echo "Configuration:"
+    echo "  Use './config.sh' to manage models and settings"
+    echo ""
+    echo "File Analysis:"
+    echo "  When a filename is provided, ollmpeg will analyze the file with FFmpeg"
+    echo "  and provide that information to the LLM for more accurate commands."
+    echo ""
+}
+
+# Function to run setup
+run_setup() {
+    print_status "Running ollmpeg setup..."
+    check_dependencies
+    ensure_model
+    setup_llm_ollama
+    print_success "Setup completed!"
+}
+
+# Main function
+main() {
+    case "${1:-}" in
+        -h|--help)
+            show_usage
+            exit 0
+            ;;
+        -s|--setup)
+            run_setup
+            exit 0
+            ;;
+        -m|--model)
+            if [ -n "${2:-}" ]; then
+                OLLAMA_MODEL="$2"
+                LLM_MODEL_NAME="$2"
+                shift 2
+            else
+                print_error "Model name required after -m/--model"
+                exit 1
+            fi
+            ;;
+        "")
+            show_usage
+            exit 1
+            ;;
+        *)
+            check_dependencies
+            ensure_model
+            setup_llm_ollama
+            
+            # Determine if first argument is a filename or a request
+            if [[ $# -eq 1 ]]; then
+                # Single argument - treat as request without file analysis
+                generate_ffmpeg_command "unknown" "$1"
+            elif [[ $# -eq 2 ]]; then
+                # Two arguments - first is filename, second is request
+                if [[ -f "$1" ]]; then
+                    generate_ffmpeg_command "$1" "$2"
+                else
+                    print_warning "File '$1' not found, proceeding without file analysis"
+                    generate_ffmpeg_command "$1" "$2"
+                fi
+            else
+                # Multiple arguments - join them as a single request
+                generate_ffmpeg_command "unknown" "$*"
+            fi
+            ;;
+    esac
+}
+
+# Run main function with all arguments
+main "$@"
