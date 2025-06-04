@@ -1,312 +1,202 @@
-# ollmpeg - Local FFmpeg Command Generator 
+# llm-ffmpeg - Natural Language FFmpeg Command Tool
 
-Natural language processing for generating FFmpeg commands. Uses Ollama for local LLM inference and Simon Willison's `llm` tool for orchestration and command extraction.
+Transform your natural language requests into ffmpeg commands using any LLM. Built on [Simon Willison's `llm` tool](https://llm.datasette.io/en/stable/) for maximum flexibility - use local models, OpenAI, Anthropic, or any other provider.
 
 ## ✨ Features
 
-- 🔒 **Completely Local** - No API calls, all processing happens on your machine
-- 🚀 **Easy to Use** - Simple command-line interface 
-- 🎨 **Interactive** - Ask before running commands, with refinement option
-- 🔧 **Configurable** - Support for different Ollama models
-- 📋 **Auto-setup** - Handles dependency checking and model installation
-- 🔄 **Refinement Loop** - Iteratively improve commands with context preservation
-- 🔍 **File Analysis** - Automatically analyzes input files with FFmpeg to provide context to the model
-
-## Prerequisites
-
-You'll need these tools installed:
-
-1. **Ollama** - For running local models
-   ```bash
-   # Install from https://ollama.ai/
-   # Or on macOS: brew install ollama
-   ```
-
-2. **llm** - Simon Willison's LLM command-line tool
-   ```bash
-   # Install instructions: https://llm.datasette.io/en/stable/setup.html
-   pip install llm
-   llm install llm-ollama
-   ```
-
-3. **FFmpeg** - For actually running the generated commands
-   ```bash
-   # macOS
-   brew install ffmpeg
-   
-   # Ubuntu/Debian
-   sudo apt install ffmpeg
-   ```
+- 🌐 **Any LLM** - Works with local models (Ollama), OpenAI, Anthropic, and more
+- 🔄 **Error Recovery** - Built in error detection and fixing
+- 📋 **Command History** - Saves successful commands for reuse
+- 🛠️ **Interactive Refinement** - Iteratively improve commands with feedback
+- 📚 **Command Explanation** - Get clear explanations of what commands do
+- 🚀 **Simple Setup** - Leverages your existing `llm` configuration
 
 ## Quick Start
 
-1. Clone or download this repository
-2. Run the setup command:
+1. **Install dependencies:**
    ```bash
-   ./ollmpeg --setup
+   brew install llm
+   brew install ffmpeg  # or your system's package manager
    ```
-3. Start generating FFmpeg commands:
+
+2. **Configure llm with a model** (choose one):
+Your default model for llm will be used. So ensure you've selected the one you would like to use. I've personally been using gemma-3n
+   ```bash
+   llm models list
+   llm models default set MODEL_NAME
+   ```
+
+3. **Test your setup:**
+   ```bash
+   llm models  # should show your available models
+   ./llm-ffmpeg --setup  # verify llm-ffmpeg configuration
+   ```
+
+4. **Start generating commands:**
    ```bash
    # File-aware mode (recommended)
-   ./ollmpeg video.mp4 "convert to audio"
+   ./llm-ffmpeg video.mp4 "convert to MP3"
    
-   # Traditional mode
-   ./ollmpeg "convert video.mp4 to audio.mp3"
+   # Pure prompt mode
+   ./llm-ffmpeg "convert video.mp4 to audio.mp3"
    ```
 
-## Usage
+## Usage Examples
 
-### File-Aware Mode (New!)
+### File-Aware Mode (Recommended)
 ```bash
-./ollmpeg FILENAME "description of what you want to do"
+# Convert with file analysis
+./llm-ffmpeg movie.mkv "convert to MP4"
+
+# Smart clipping with subtitles
+./llm-ffmpeg video.mkv "clip from 1:30 to 2:45 with subtitles"
+
+# Format-aware operations
+./llm-ffmpeg input.avi "resize to 720p maintaining quality"
+
+# Stream-specific tasks
+./llm-ffmpeg multilang.mkv "extract english audio track"
 ```
 
-The AI will automatically analyze your file and provide commands tailored to your specific video/audio properties.
-
-### Traditional Mode
+### Prompt Mode
 ```bash
-./ollmpeg "description of what you want to do"
+# Basic conversions
+./llm-ffmpeg "convert input.mp4 to output.mp3"
+./llm-ffmpeg "resize video.mp4 to 720p"
+./llm-ffmpeg "extract first 30 seconds from video.mp4"
+./llm-ffmpeg "combine audio.mp3 with video.mp4"
 ```
 
 ### Interactive Refinement
 After generating a command, you can:
 - **[y]** - Run the command immediately
 - **[n]** - Copy to clipboard and exit
-- **[r]** - Refine the command with feedback
+- **[e]** - Explain what this command does
+- **[r]** - Refine with feedback
+- **[s]** - Show command history
 
-## Examples
+If a command fails, llm-ffmpeg will:
+- Analyze the error automatically
+- Suggest common fixes
+- Let you fix it automatically or manually refine
 
-### File-Aware Examples (Recommended)
+### Command Line Options
 ```bash
-# Analyze file and convert to audio
-./ollmpeg movie.mkv "convert to MP3"
-
-# Smart subtitle handling
-./ollmpeg video.mkv "clip from 1:30 to 2:45 with english subtitles"
-
-# Format-aware conversion
-./ollmpeg input.avi "convert to MP4 maintaining quality"
-
-# Stream-specific operations
-./ollmpeg multilang.mkv "extract japanese audio track"
-
-# Codec-aware processing
-./ollmpeg hdr_video.mp4 "resize to 720p preserving HDR"
-```
-
-### Traditional Examples
-```bash
-# Convert video to audio
-./ollmpeg "convert video.mp4 to audio.mp3"
-
-# Resize video
-./ollmpeg "resize input.mp4 to 720p and save as output.mp4"
-
-# Extract clip
-./ollmpeg "extract first 30 seconds from input.mp4"
-
-# Combine audio and video
-./ollmpeg "combine audio.mp3 with video.mp4"
-
-# Convert format with quality settings
-./ollmpeg "convert input.avi to mp4 with high quality"
-
-# Add watermark
-./ollmpeg "add watermark.png to bottom right of video.mp4"
-
-# Speed up video
-./ollmpeg "speed up video.mp4 by 2x"
-
-# Extract audio from specific time range
-./ollmpeg "extract audio from minute 2 to minute 5 of video.mp4"
-```
-
-### Refinement Examples
-```bash
-# Initial command
-./ollmpeg video.mkv "clip from 1:00 to 2:00"
-# Generated: ffmpeg -i video.mkv -ss 01:00 -to 02:00 -c copy output.mkv
-
-# [r] Refine with: "save as MP4 instead"
-# Refined: ffmpeg -i video.mkv -ss 01:00 -to 02:00 -c:v libx264 -c:a copy output.mp4
-
-# [r] Refine with: "include subtitles"
-# Refined: ffmpeg -i video.mkv -ss 01:00 -to 02:00 -c:v libx264 -c:a copy -c:s copy output.mp4
-```
-
-## File Analysis Benefits
-
-When you provide a filename, ollmpeg will:
-
-1. **Analyze File Properties**:
-   - Video codec, resolution, framerate
-   - Audio codec, channels, bitrate
-   - All subtitle tracks with languages
-   - Container format and duration
-
-2. **Generate Smarter Commands**:
-   - Use actual stream indices
-   - Respect codec compatibility
-   - Handle subtitle formats correctly
-   - Optimize for your specific file
-
-3. **Preserve Context in Refinement**:
-   - Filename stays consistent
-   - File analysis included in refinement
-   - No reverting to generic placeholders
-
-## Options
-```bash
-./ollmpeg --help           # Show usage information
-./ollmpeg --setup          # Run setup (install models, configure llm)
-./ollmpeg --model MODEL    # Use specific Ollama model
-```
-
-### Using Different Models
-```bash
-# Use gemma3 model
-./ollmpeg --model gemma3:4b video.mp4 "convert to gif"
-
-# Use deepseek model (default)
-./ollmpeg --model deepseek-r1:1.5b video.mkv "extract frames"
+./llm-ffmpeg --help              # Show usage
+./llm-ffmpeg --setup             # Check dependencies
+./llm-ffmpeg --list-models       # Show available models
+./llm-ffmpeg --history           # Show command history
+./llm-ffmpeg -m MODEL "request"  # Use specific model
 ```
 
 ## How It Works
 
 1. **File Analysis** (if filename provided) - FFmpeg analyzes your file properties
-2. **User Input** - You describe what you want to do
-3. **AI Generation** - Ollama processes your request with file context using a local model
-4. **Command Extraction** - Clean FFmpeg command extracted using `llm -x`
-5. **User Interaction** - Choose to run, copy, or refine the command
-6. **Context Preservation** - Refinements maintain file information and filename
-7. **Execution** - If confirmed, the FFmpeg command runs directly
-
-## Configuration
-
-The script uses these defaults:
-- **Model**: `deepseek-r1:1.5b` (fast and capable)
-- **Temp Directory**: `/tmp/ollmpeg`
-- **Logging**: All LLM commands logged to `/tmp/ollmpeg/llm_commands.log`
-
-You can modify these at the top of the `ollmpeg` script if needed.
-
-## Debugging and Logging
-
-All interactions are logged for debugging:
-
-```bash
-# View LLM commands
-cat /tmp/ollmpeg/llm_commands.log
-
-# View file analysis
-cat /tmp/ollmpeg/file_info.txt
-
-# View raw responses
-cat /tmp/ollmpeg/response.txt
-
-# View errors
-cat /tmp/ollmpeg/error.log
-```
+2. **Smart Prompting** - Context-aware prompts sent to your configured LLM
+3. **Command Extraction** - Clean ffmpeg commands extracted from LLM response
+4. **Interactive Options** - Choose to run, copy, or refine
+5. **Error Recovery** - If command fails, automatic error analysis and fixing
+6. **History Tracking** - Successful commands saved for future reference
 
 ## Supported Models
 
-The script works with any Ollama model, but these are recommended for FFmpeg tasks:
+llm-ffmpeg works with any model supported by the `llm` tool:
 
-- `deepseek-r1:1.5b` (default) - Fast, good at code generation
-- `gemma3:4b` - Excellent balance of speed and accuracy
-- `llama3.2:3b` - More capable for complex requests
-- `codellama:7b` - Specialized for code generation
+### Local Models (via Ollama)
+```bash
+llm install llm-ollama
+ollama pull llama3.2:3b      # Good balance of speed/quality
+ollama pull deepseek-r1:1.5b # Fast and capable
+ollama pull codellama:7b     # Specialized for code
+```
+
+### Cloud Models
+```bash
+# OpenAI (GPT-3.5, GPT-4, etc.)
+llm keys set openai
+
+# Anthropic (Claude)
+llm install llm-anthropic
+llm keys set anthropic
+
+# Google (Gemini)
+llm install llm-gemini
+llm keys set gemini
+```
+
+## Error Recovery
+
+llm-ffmpeg automatically detects and suggests fixes for common errors:
+
+- **File not found** → Check paths and spelling
+- **Codec not found** → Suggest alternative codecs  
+- **Permission denied** → Check output directory permissions
+- **Invalid stream** → Analyze available streams
+- **File exists** → Suggest overwrite flag
+
+Example error recovery flow:
+```bash
+./llm-ffmpeg video.mp4 "convert to audio"
+# Generated: ffmpeg -i video.mp4 output.wav
+# [y] Run command
+# Error: Permission denied writing to output.wav
+# [f] Try to fix automatically
+# Fixed: ffmpeg -i video.mp4 ~/Downloads/output.wav
+```
+
+## Command History
+
+View and reuse successful commands:
+```bash
+./llm-ffmpeg --history
+# [2024-01-15 10:30:45] video.mp4: "convert to audio" -> ffmpeg -i video.mp4 -vn output.mp3
+# [2024-01-15 10:32:12] movie.mkv: "clip with subtitles" -> ffmpeg -i movie.mkv -ss 00:01:30 ...
+```
 
 ## Troubleshooting
-
-### Model Not Available
-If you get a "model not available" error:
-```bash
-ollama list  # Check available models
-ollama pull deepseek-r1:1.5b  # Pull the default model
-```
-
-### llm-ollama Plugin Issues
-If the llm integration isn't working:
-```bash
-llm install llm-ollama  # Reinstall the plugin
-llm models  # Check available models
-```
-
-### File Analysis Issues
-If file analysis fails:
-```bash
-# Check if file exists
-ls -la yourfile.mp4
-
-# Test FFmpeg directly
-ffmpeg -i yourfile.mp4
-
-# Check logs
-cat /tmp/ollmpeg/file_info.txt
-```
-
-### FFmpeg Command Fails
-1. Check the generated command in the logs
-2. Verify input files exist
-3. Ensure you have write permissions for output files
-4. Use refinement to fix issues: `[r] "fix the output filename"`
+For logs check the `/tmp/llm-ffmpeg/` directory.
 
 ### Setup Issues
-Run the setup command to check dependencies:
 ```bash
-./ollmpeg --setup
+./llm-ffmpeg --setup  # Comprehensive setup check
 ```
 
-## Advanced Usage
-
-### Batch Processing with File Analysis
+### Model Not Working
 ```bash
-for file in *.mp4; do
-    ./ollmpeg "$file" "convert to ${file%.mp4}.mp3"
-done
+llm models  # Check available models
+llm "test"  # Test your default model
 ```
 
-### Complex File Operations
+### Command Extraction Issues
+If the LLM returns invalid commands:
+- Try a different model with `./llm-ffmpeg -m MODEL`
+- Use refinement to provide more specific instructions
+- Check the raw LLM output in `/tmp/llm-ffmpeg/response.txt`
+
+### File Analysis Problems
 ```bash
-# Multi-stream operations
-./ollmpeg movie.mkv "extract english audio and chinese subtitles to separate files"
-
-# Format conversion with analysis
-./ollmpeg hdr_content.mkv "convert to MP4 compatible with older devices"
-
-# Stream mapping
-./ollmpeg multi_audio.mkv "create version with only first audio track"
+# Test file analysis manually
+ffmpeg -i yourfile.mp4  # Should work
+ls -la yourfile.mp4     # Check file exists and permissions
 ```
 
-### Debugging Workflows
-```bash
-# Generate command without running
-./ollmpeg video.mp4 "convert to audio" 
-# Choose [n] to copy to clipboard
+## Configuration Files
 
-# Check what the AI sees
-cat /tmp/ollmpeg/file_info.txt
-cat /tmp/ollmpeg/llm_commands.log
-```
+- `~/.llm-ffmpeg_history` - Command history
+- `/tmp/llm-ffmpeg/` - Temporary files and logs
 
 ## Contributing
 
-Feel free to submit issues or pull requests! Some ideas for improvements:
+Ideas for improvements:
+- [ ] Template system for common operations
 
-- [ ] Support for batch operations UI
-- [ ] History of generated commands
-- [ ] Custom prompt templates
-- [ ] Video preview integration
-- [ ] Output format validation
-- [ ] Stream mapping visualization
+## Credits
+
+- [llm](https://github.com/simonw/llm) by Simon Willison - LLM command-line interface
+- [FFmpeg](https://ffmpeg.org/) - Multimedia processing
+- [Ollama](https://ollama.ai/) - Local model support
+- Vibe Coded using Cline with Sonnet 4
 
 ## License
 
 MIT License - feel free to use and modify as needed.
-
-## Credits
-
-- [Ollama](https://ollama.ai/) - For local LLM inference
-- [llm](https://github.com/simonw/llm) by Simon Willison - For command-line LLM interaction
-- [FFmpeg](https://ffmpeg.org/) - For multimedia processing
